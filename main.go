@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -41,6 +40,7 @@ func route(path string) (host, upstreamPath string) {
 type responseLog struct {
 	http.ResponseWriter
 	status int
+	err    error
 }
 
 func (w *responseLog) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -60,11 +60,10 @@ func main() {
 	if *publicURL != "" {
 		u, err := url.Parse(base)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-			slog.Error("invalid -public-url")
+			logger.Print("ERROR  invalid -public-url")
 			os.Exit(2)
 		}
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableCompression = true
 	transport.ResponseHeaderTimeout = 30 * time.Second
@@ -88,7 +87,7 @@ func main() {
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			logger.Warn("upstream error", "host", r.URL.Host, "error", err.Error())
+			w.(*responseLog).err = err
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}
@@ -99,9 +98,7 @@ func main() {
 		out := &responseLog{ResponseWriter: w}
 		complete := false
 		defer func() {
-			logger.Info("request", "ip", ip, "method", r.Method, "host", host,
-				"path", path, "status", out.status, "success", complete && out.status >= 200 && out.status < 400,
-				"duration_ms", time.Since(start).Milliseconds())
+			logRequest(out, complete, r.Method, ip, host, path, time.Since(start))
 		}()
 		if r.URL.EscapedPath() == discoveryPath {
 			host = discoveryHost
@@ -110,7 +107,7 @@ func main() {
 				origin = "http://" + r.Host
 			}
 			if err := serveDiscovery(out, r, origin); err != nil {
-				logger.Warn("discovery failed", "error", err.Error())
+				out.err = err
 				if out.status == 0 {
 					http.Error(out, "Bad Gateway", http.StatusBadGateway)
 				}
@@ -124,9 +121,9 @@ func main() {
 		complete = true
 	})
 	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
-	logger.Info("listening", "addr", *listen)
+	logger.Printf("%s  Listening on %s", label("MojProxy", "36"), *listen)
 	if err := server.ListenAndServe(); err != nil {
-		logger.Error("server stopped", "error", err)
+		logger.Printf("%s  %q", label("ERROR", "31"), err.Error())
 		os.Exit(1)
 	}
 }
